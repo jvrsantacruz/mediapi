@@ -1,0 +1,63 @@
+version: '3'
+services:
+
+    nginx:
+        image: nginx
+        container_name: nginx
+        restart: always
+        ports:
+            - 80:80
+        volumes:
+            - ${NGINX_CONFIG}:/etc/nginx/conf.d
+        links:
+            - couchpotato
+            - transmission
+
+    couchpotato:
+        build:
+            context: ./couchpotato
+            args:
+                base: ${BASE}
+        container_name: couchpotato
+        restart: unless-stopped
+        deploy:
+          resources:
+            limits:
+              cpus: '0.50'
+        volumes:
+            - ${LIBRARY_DIR}:/movies
+            - ${DOWNLOADS_DIR}:/downloads
+            - ${COUCHPOTATO_CONFIG_DIR}:/config
+        links:
+            - transmission
+
+    transmission:
+        build: 
+            context: ./transmission
+            args:
+                base: ${BASE}
+        container_name: transmission
+        restart: unless-stopped
+        environment:
+            - PUID=1000
+            - PGID=1000
+            - TZ=Europe/Madrid
+        ports:
+            - 51413:51413
+            - 51413:51413/udp
+        volumes:
+            - ${TRANSMISSION_CONFIG_DIR}:/config
+            - ${INCOMPLETE_DIR}:/incomplete
+            - ${DOWNLOADS_DIR}:/downloads
+            - ${TORRENTS_DIR}:/torrents
+
+    duckdns:
+        image: linuxserver/duckdns
+        container_name: duckdns
+        environment:
+            - PUID=1000
+            - PGID=1000
+            - TZ=Europe/Madrid
+            - SUBDOMAINS=${DUCKDNS_DOMAINS}
+            - TOKEN=${DUCKDNS_TOKEN}
+        restart: unless-stopped

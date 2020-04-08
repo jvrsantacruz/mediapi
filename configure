@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Configure couchpotato/transmission"""
+
+import sys
+import json
+from configparser import ConfigParser
+import logging
+from pathlib import Path
+from argparse import ArgumentParser
+
+_LOGGING_FMT_ = '%(asctime)s %(levelname)-8s %(message)s'
+
+
+def get_couchpotato_config(base: Path) -> Path:
+    return base / 'couchpotato' / 'config' / 'CouchPotato.cfg'
+
+
+def configure_couchpotato(base, options) -> Path:
+    config_path = get_couchpotato_config(base)
+    config = ConfigParser()
+    config.read(str(config_path))
+
+    sections = (
+        'core',  'transmission', 'torrentz', 'yts',
+        'kickasstorrents', 'thepiratebay'
+    )
+    for section in sections:
+        if section not in config:
+            config[section] = {}
+
+    config['core']['username'] = options['username']
+    config['core']['url_base'] = '/couchpotato'
+    config['transmission']['enabled'] = '1'
+    config['transmission']['host'] = options['transmission-host']
+    config['transmission']['directory'] = options['download-dir']
+    config['transmission']['username'] = options['username']
+    config['transmission']['password'] = options['password']
+
+    config['torrentz']['enabled'] = 'True'
+    config['torrentz']['seed_time'] = '40'
+    config['torrentz']['seed_ratio'] = '1'
+
+    config['yts']['enabled'] = 'True'
+    config['yts']['seed_time'] = '40'
+    config['yts']['seed_ratio'] = '1'
+
+    config['kickasstorrents']['enabled'] = 'True'
+    config['kickasstorrents']['only_verified'] = 'False'
+    config['kickasstorrents']['seed_time'] = '40'
+    config['kickasstorrents']['seed_ratio'] = '1'
+
+    config['thepiratebay']['enabled'] = 'True'
+    config['thepiratebay']['trusted_only'] = 'False'
+    config['thepiratebay']['seed_time'] = '40'
+    config['thepiratebay']['seed_ratio'] = '1'
+
+    with config_path.open('w') as stream:
+        config.write(stream)
+
+
+def get_transmission_config(base: Path):
+    return base / 'transmission' / 'config' / 'settings.json'
+
+
+def configure_transmission(base, options):
+    config_path = get_transmission_config(base)
+    try:
+        with config_path.open() as stream:
+            config = json.load(stream)
+    except FileNotFoundError:
+        config = {}
+
+    config['rpc-enabled'] = True
+    config['rpc-bind-address'] = '0.0.0.0'
+    config['rpc-username'] = options['username']
+    config['rpc-password'] = options['password']
+    config['rpc-port'] = options['transmission-port']
+
+    config['watch-dir-enabled'] = True
+    config['watch-dir'] = options['torrents-dir']
+
+    config['incomplete-dir-enabled'] = True
+    config['incomplete-dir'] = options['incomplete-dir']
+
+    config['download-dir'] = options['download-dir']
+    config['peer-port-random-low'] = \
+        options['transmission-peer-port-random-low']
+    config['download-queue-size'] = options['transmission-download-queue-size']
+
+    with config_path.open('w') as stream:
+        json.dump(config, stream)
+
+
+def error(msg, is_exit=True):
+    logging.error(msg)
+    if is_exit:
+        sys.exit()
+
+
+def parse_args():
+    parser = ArgumentParser(usage="%(prog)s [options] ARG ARG")
+
+    parser.add_argument(
+        "-d", "--dir", default=".",  type=Path,
+        metavar='DIR', help="Path to project root",
+    )
+    parser.add_argument(
+        "-v", "--verbose", dest="verbose", action="count", default=0, help=""
+    )
+
+    args = parser.parse_args()
+
+    # Validate and convert args
+    args.dir = args.dir.absolute().resolve()
+    if not args.dir.is_dir():
+        error('--dir must be a DIR')
+
+    # Configure logging
+    logging_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+    level = logging_levels[args.verbose if args.verbose < 3 else 2]
+    logging.basicConfig(level=level, format=_LOGGING_FMT_)
+
+    return args
+
+
+def main():
+    args = parse_args()
+
+    options = {
+        'username': 'YOUR_USER',
+        'password': 'YOUR_PASS',
+        'transmission-host': 'http://transmission:9091',
+        'transmission-port': 9091,
+        'transmission-peer-port-random-low': 50001,
+        'transmission-download-queue-size': 5,
+        'download-dir': '/downloads',
+        'torrents-dir': '/torrents',
+        'incomplete-dir': '/incomplete',
+    }
+
+    configure_couchpotato(args.dir, options)
+    configure_transmission(args.dir, options)
+
+
+if __name__ == "__main__":
+    main()
