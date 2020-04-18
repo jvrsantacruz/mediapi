@@ -4,6 +4,9 @@
 
 import sys
 import json
+import logging
+import sqlite3
+import xml.etree.ElementTree as ET
 from configparser import ConfigParser
 import logging
 from pathlib import Path
@@ -12,11 +15,228 @@ from argparse import ArgumentParser
 _LOGGING_FMT_ = '%(asctime)s %(levelname)-8s %(message)s'
 
 
+class JsonConfig:
+    def __init__(self, path: Path):
+        self.path = path
+
+    def update(self, data):
+        config = self.config
+        config.update(data)
+        self.config = config
+        return config
+
+    def __getitem__(self, name):
+        return self.config.get(name)
+
+    @property
+    def config(self) -> dict:
+        logging.info('Reading json config %s', self.path)
+        try:
+            with self.path.open() as stream:
+                return json.load(stream)
+        except Exception as error:
+            logging.warning('Could not load %s config: %s', self.path, error)
+            return {}
+
+    @config.setter
+    def config(self, data):
+        logging.info('Writing json config %s', self.path)
+        with self.path.open('w') as stream:
+            return json.dump(data, stream)
+
+
+class Jackett:
+    def __init__(self, base: Path):
+        self.base = base
+
+    def init(self, options):
+        self.config.update({
+            'BlackholeDir': options['torrents-dir'],
+            'BasePathOverride': '/jackett',
+        })
+
+    @property
+    def config(self) -> JsonConfig:
+        return JsonConfig(self.base / 'Jackett' / 'ServerConfig.json')
+
+
+class Transmission:
+    def __init__(self, base: Path):
+        self.base = base
+
+    def init(self, options):
+        self.config.update({
+            'download-dir': options['download-dir'],
+            'download-queue-size': options['transmission-download-queue-size'],
+            'incomplete-dir-enabled': True,
+            'incomplete-dir': options['incomplete-dir'],
+            'peer-port-random-low': 50001,
+            'rpc-authentication-required': True,
+            'rpc-bind-address': '0.0.0.0',
+            'rpc-enabled': True,
+            'rpc-host-whitelist': '*.*.*.*',
+            'rpc-host-whitelist-enabled': False,
+            'rpc-password': options['password'],
+            'rpc-port': 9091,
+            'rpc-username': options['username'],
+            'rpc-whitelist': '*.*.*.*',
+            'rpc-whitelist-enabled': False,
+            'watch-dir-enabled': True,
+            'watch-dir': options['torrents-dir'],
+        })
+
+    @property
+    def config(self) -> Path:
+        return JsonConfig(self.base / 'settings.json')
+
+
+class Radarr:
+    def __init__(self, base: Path, jackett: Jackett):
+        self.base = base
+        self.jackett = jackett
+        self._db = None
+
+    def init(self, options):
+        self.set_url_base(options)
+        self.set_indexer(options)
+        self.set_downloader(options)
+        self.set_root_folder(options)
+
+    @property
+    def config_path(self) -> Path:
+        return self.base / 'config.xml'
+
+    @property
+    def db_path(self) -> Path:
+        return self.base / 'nzbdrone.db'
+
+    @property
+    def db(self):
+        if self._db is None:
+            self._db = sqlite3.connect(str(self.db_path))
+        return self._db
+
+    def set_url_base(self, options):
+        if self.config_path.exists():
+            tree = ET.parse(str(self.config_path))
+        else:
+            tree = ET.fromstring('<Config><UrlBase/></Config>')
+        tree.find('UrlBase').text = '/radarr'
+        tree.write(str(self.config_path))
+
+    def insert_or_update(self, table, name, data, key='Name'):
+        fields = tuple(data)
+        values = tuple(data[f] for f in fields)
+
+        results = self.db.execute(
+            'SELECT Id FROM {} WHERE {}= ?'.format(table, key),
+            (name,)
+        ).fetchone()
+        if results:
+            logging.info('Updating %s configuration in radarr', name)
+
+            self.db.execute(
+                'UPDATE {} '.format(table) +
+                'SET {} '.format(','.join(f + '=?' for f in fields)) +
+                'WHERE Id = {}'.format(results[0]),
+                values
+            )
+        else:
+            logging.info('Setting %s configuration in radarr', name)
+            self.db.execute(
+                'INSERT INTO {} ({})'.format(table, ','.join(fields)) +
+                'VALUES ({})'.format(','.join('?' * len(fields))),
+                values
+            )
+        self.db.commit()
+
+    def set_indexer(self, options):
+        table = 'Indexers'
+        name = 'Jackett'
+        settings = {
+            "minimumSeeders": 1,
+            "requiredFlags": [],
+            "baseUrl": "http://jackett:9117/jackett"
+            "/api/v2.0/indexers/all/results/torznab/",
+            "multiLanguages": [],
+            "apiKey": self.jackett.config['APIKey'],
+            "categories": [2000, 2010, 2020, 2030,
+                           2035, 2040, 2045, 2050, 2060],
+            "animeCategories": [],
+            "removeYear": False,
+            "searchByTitle": False
+        }
+        data = {
+            'Name': name,
+            'Implementation': 'Torznab',
+            'Settings': json.dumps(settings, indent=2),
+            'ConfigContract': 'TorznabSettings',
+            'EnableRss': 1,
+            'EnableSearch': 1
+        }
+        self.insert_or_update(table, name, data)
+
+    def set_downloader(self, options):
+        table = 'DownloadClients'
+        name = 'transmission'
+        settings = {
+            'host': 'transmission',
+            'port': 9091,
+            'urlBase': '/transmission/',
+            'username': options['username'],
+            'password': options['password'],
+            'movieCategory': 'radarr',
+            'recentMoviePriority': 0,
+            'oldMoviePriority': 0,
+            'addPaused': False,
+            'useSsl': False,
+        }
+        data = {
+            'Enable': 1,
+            'Name': name,
+            'Implementation': 'Transmission',
+            'Settings': json.dumps(settings, indent=2),
+            'ConfigContract': 'TransmissionSettings'
+        }
+        self.insert_or_update(table, name, data)
+
+    def set_config(self, options):
+        table = 'Config'
+        key = 'Key'
+        name = 'enablecompleteddownloadhandling'
+        data = {
+            'Key': name,
+            'Value': True
+        }
+        self.insert_or_update(table, name, data, key=key)
+
+    def set_root_folder(self, options):
+        table = 'RootFolders'
+        key = 'Path'
+        name = '/media/movies'
+        data = {key: name}
+        self.insert_or_update(table, name, data, key=key)
+
+    def set_naming(self, options):
+        table = 'NamingConfig'
+        key = 'Id'
+        name = 1
+        data = {
+            'MultiEpisodeStyle': 0,
+            'RenameEpisodes': 1,
+            'ReplaceIllegalCharacters': 1,
+            'StandardMovieFormat': '{Movie Title} - {Release Year} - ',
+            'MovieFolderFormat': '{Movie Title} ({Release Year})',
+            'ColonReplacementFormat': 0,
+        }
+        self.insert_or_update(table, name, data, key=key)
+
+
 def get_couchpotato_config(base: Path) -> Path:
     return base / 'couchpotato' / 'config' / 'CouchPotato.cfg'
 
 
-def configure_couchpotato(base, options) -> Path:
+def configure_couchpotato(base, options):
     config_path = get_couchpotato_config(base)
     config = ConfigParser()
     config.read(str(config_path))
@@ -59,37 +279,28 @@ def configure_couchpotato(base, options) -> Path:
         config.write(stream)
 
 
-def get_transmission_config(base: Path):
-    return base / 'transmission' / 'config' / 'settings.json'
+def parse_options(base: Path) -> dict:
+    config_path = base / '.env'
+    with config_path.open() as stream:
+        config_text = stream.read()
 
+    parser = ConfigParser()
+    parser.read_string('[config]' + config_text)
+    options = {k.replace('_', '-'): v for k,v in parser.items('config')}
+    options.update({
+        'radarr-config': Path(options['radarr-config']),
+        'jackett-config': Path(options['jackett-config']),
+        'transmission-config': Path(options['transmission-config']),
+        'transmission-host': 'http://transmission:9091',
+        'aransmission-peer-port-random-low': 50001,
+        'transmission-download-queue-size': 5,
+        # Container internal paths
+        'download-dir': '/media/downloads/completed',
+        'torrents-dir': '/media/downloads/torrents',
+        'incomplete-dir': '/media/downloads/incomplete',
+    })
 
-def configure_transmission(base, options):
-    config_path = get_transmission_config(base)
-    try:
-        with config_path.open() as stream:
-            config = json.load(stream)
-    except FileNotFoundError:
-        config = {}
-
-    config['rpc-enabled'] = True
-    config['rpc-bind-address'] = '0.0.0.0'
-    config['rpc-username'] = options['username']
-    config['rpc-password'] = options['password']
-    config['rpc-port'] = options['transmission-port']
-
-    config['watch-dir-enabled'] = True
-    config['watch-dir'] = options['torrents-dir']
-
-    config['incomplete-dir-enabled'] = True
-    config['incomplete-dir'] = options['incomplete-dir']
-
-    config['download-dir'] = options['download-dir']
-    config['peer-port-random-low'] = \
-        options['transmission-peer-port-random-low']
-    config['download-queue-size'] = options['transmission-download-queue-size']
-
-    with config_path.open('w') as stream:
-        json.dump(config, stream)
+    return options
 
 
 def error(msg, is_exit=True):
@@ -126,21 +337,16 @@ def parse_args():
 
 def main():
     args = parse_args()
+    options = parse_options(args.dir)
 
-    options = {
-        'username': 'YOUR_USER',
-        'password': 'YOUR_PASS',
-        'transmission-host': 'http://transmission:9091',
-        'transmission-port': 9091,
-        'transmission-peer-port-random-low': 50001,
-        'transmission-download-queue-size': 5,
-        'download-dir': '/downloads',
-        'torrents-dir': '/torrents',
-        'incomplete-dir': '/incomplete',
-    }
+    transmission = Transmission(options['transmission-config'])
+    transmission.init(options)
 
-    configure_couchpotato(args.dir, options)
-    configure_transmission(args.dir, options)
+    jackett = Jackett(options['jackett-config'])
+    jackett.init(options)
+
+    radarr = Radarr(options['radarr-config'], jackett=jackett)
+    radarr.init(options)
 
 
 if __name__ == "__main__":
