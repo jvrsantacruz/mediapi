@@ -213,7 +213,7 @@ class Radarr:
     def set_root_folder(self, options):
         table = 'RootFolders'
         key = 'Path'
-        name = '/media/movies'
+        name = options['movies-dir']
         data = {key: name}
         self.insert_or_update(table, name, data, key=key)
 
@@ -295,6 +295,7 @@ def parse_options(base: Path) -> dict:
         'aransmission-peer-port-random-low': 50001,
         'transmission-download-queue-size': 5,
         # Container internal paths
+        'movies-dir': '/media/movies',
         'download-dir': '/media/downloads/completed',
         'torrents-dir': '/media/downloads/torrents',
         'incomplete-dir': '/media/downloads/incomplete',
