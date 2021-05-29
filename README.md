@@ -28,3 +28,4 @@ Create a _.env_ file in the root directory with the following variables:
     RADARR_CONFIG=./radarr/config
     JACKETT_CONFIG=./jackett/config
     TRANSMISSION_CONFIG=./transmission/config
+    EMBY_CONFIG=./emby/config
